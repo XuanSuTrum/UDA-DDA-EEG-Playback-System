@@ -39,6 +39,8 @@ datasets/
 stimulation-file/
 system log/
 logs/
+raw_data/
+SEED/
 *.mat
 *.edf
 *.bdf
@@ -57,11 +59,16 @@ runs/
 *.ckpt
 *.h5
 *.onnx
+*.keras
 *.joblib
 *.pkl
 
 # Generated predictions and analysis outputs
 predictions_display.csv
+subject*_predictions*.csv
+subject*_trial_summary*.csv
+subject*_lds_compare_summary.csv
+202605021800.txt
 outputs/
 results/
 artifacts/
@@ -74,3 +81,10 @@ artifacts/
 *.bak
 *.swp
 *~
+
+# PyInstaller and executable outputs
+build/
+dist/
+*.spec
+*.exe
+*.dll

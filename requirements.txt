@@ -1,0 +1,10 @@
+numpy
+pandas
+scipy
+matplotlib
+torch
+scikit-learn
+joblib
+PyQt5
+pyqtgraph
+pyserial

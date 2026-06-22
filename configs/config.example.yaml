@@ -1,0 +1,31 @@
+# Example local configuration. Copy values into your own untracked config file
+# or pass the same paths through command-line arguments.
+
+paths:
+  replay_mat: data/upper_demo/subject15_trial4_15_replay_62ch.mat
+  replay_meta_csv: data/upper_demo/subject15_trial4_15_replay_meta.csv
+  calibration_feature_mat: data/seed_features/15_calibration_3trials.mat
+  online_feature_mat: data/seed_features/15_online_remaining_trials.mat
+  model_weight: models/subject15_calib_supervised_best_model.pth
+  output_dir: outputs/upper_demo
+  prediction_display_csv: outputs/upper_demo/subject15_trial4_15_predictions_display.csv
+  upper_computer_log: logs/upper_computer.log
+
+playback:
+  sample_rate_hz: 200
+  window_samples: 200
+  display_channels:
+    - FP1
+    - FP2
+    - F3
+    - F4
+    - T7
+    - T8
+    - P3
+    - P4
+
+prediction:
+  source: predictions_display.csv
+  feature_source: DE+LDS
+  negative_threshold_reference: 0.5
+  non_negative_definition: P(neutral) + P(positive)
