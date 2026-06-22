@@ -1,0 +1,76 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+conda-env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local configuration and secrets
+.env
+.env.*
+*.local.yaml
+*.local.yml
+*.local.json
+
+# EEG datasets and local replay inputs
+data/
+dataset/
+datasets/
+stimulation-file/
+system log/
+logs/
+*.mat
+*.edf
+*.bdf
+*.set
+*.fdt
+*.npy
+*.npz
+
+# Model weights and checkpoints
+models/
+weights/
+checkpoints/
+runs/
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.onnx
+*.joblib
+*.pkl
+
+# Generated predictions and analysis outputs
+predictions_display.csv
+outputs/
+results/
+artifacts/
+*_解析数据.csv
+*_试次摘要.csv
+
+# Temporary and backup files
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
