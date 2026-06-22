@@ -4,9 +4,10 @@ Offline DE+LDS feature-chain diagnosis.
 This script compares two scaler modes without changing training code or model
 structure:
 
-1. match_training_test:
+1. match_training_test (leaky_diagnostic / diagnostic_only):
    Fit MinMaxScaler on subject 15 online remaining DE+LDS features. This leaks
-   test-set statistics and is used only to reproduce the offline upper bound.
+   replay/test-set statistics, is disabled by default, and is only available
+   through --include-leaky-diagnostic for diagnostic reproduction.
 
 2. calibration_feature:
    Fit MinMaxScaler on subject 15 calibration DE+LDS features, then transform
@@ -51,6 +52,12 @@ TRANSFER_LOSS = "mmd"
 SCALER_POSTPROCESS = "clip"
 CLIP_MIN = -1.0
 CLIP_MAX = 1.0
+LEAKY_DIAGNOSTIC_SCALER_MODE = "match_training_test"
+LEAKY_DIAGNOSTIC_WARNING = (
+    "WARNING: match_training_test uses replay/test-set statistics and is for "
+    "diagnostic reproduction only. It must not be used for deployment or "
+    "formal display output."
+)
 
 RAW_LABELS_SESSION1 = [1, 0, -1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 0, 1, -1]
 ONLINE_TRIAL_IDS = list(range(4, 16))
@@ -99,7 +106,7 @@ def load_model(model_path, device):
 
 def build_scaler(scaler_mode, calib_features, online_features):
     scaler = MinMaxScaler(feature_range=(-1, 1))
-    if scaler_mode == "match_training_test":
+    if scaler_mode == LEAKY_DIAGNOSTIC_SCALER_MODE:
         scaler.fit(online_features)
     elif scaler_mode == "calibration_feature":
         scaler.fit(calib_features)
@@ -253,13 +260,18 @@ def build_trial_summary(results_df):
 
 def output_paths_for_mode(scaler_mode, scaler_postprocess):
     output_dir = Path(OUTPUT_DIR)
-    result_csv = str(output_dir / f"test_offline_lds_{scaler_mode}_{scaler_postprocess}_result.csv")
-    trial_summary_csv = str(output_dir / f"test_offline_lds_{scaler_mode}_{scaler_postprocess}_trial_summary.csv")
-    confusion_csv = str(output_dir / f"test_offline_lds_{scaler_mode}_{scaler_postprocess}_confusion.csv")
+    suffix = f"{scaler_mode}_{scaler_postprocess}"
+    if scaler_mode == LEAKY_DIAGNOSTIC_SCALER_MODE:
+        suffix = f"{suffix}_diagnostic_only"
+    result_csv = str(output_dir / f"test_offline_lds_{suffix}_result.csv")
+    trial_summary_csv = str(output_dir / f"test_offline_lds_{suffix}_trial_summary.csv")
+    confusion_csv = str(output_dir / f"test_offline_lds_{suffix}_confusion.csv")
     return result_csv, trial_summary_csv, confusion_csv
 
 
 def run_lds_feature_test(scaler_mode, scaler_postprocess=SCALER_POSTPROCESS):
+    if scaler_mode == LEAKY_DIAGNOSTIC_SCALER_MODE:
+        print(LEAKY_DIAGNOSTIC_WARNING)
     print("\n" + "=" * 70)
     print(
         "Offline DE+LDS test | "
@@ -425,7 +437,23 @@ def parse_args(argv=None):
     parser.add_argument("--online-feature", default=ONLINE_FEATURE_PATH, help="Online/demo feature MAT path.")
     parser.add_argument("--model-path", default=MODEL_PATH, help="UDA-DDA model weight path. Weights are not distributed in this repository.")
     parser.add_argument("--output-dir", default=OUTPUT_DIR, help="Directory for diagnostic CSV outputs.")
+    parser.add_argument(
+        "--include-leaky-diagnostic",
+        action="store_true",
+        help="Also run match_training_test using replay/test-set statistics. Diagnostic reproduction only.",
+    )
     return parser.parse_args(argv)
+
+
+def diagnostic_test_configs(include_leaky_diagnostic=False):
+    configs = [
+        ("calibration_feature", "none"),
+        ("calibration_feature", "clip"),
+        ("calibration_feature", "tanh"),
+    ]
+    if include_leaky_diagnostic:
+        configs.insert(0, (LEAKY_DIAGNOSTIC_SCALER_MODE, "none"))
+    return configs
 
 
 def main(argv=None):
@@ -437,12 +465,9 @@ def main(argv=None):
     print("=" * 70)
 
     summary_rows = []
-    test_configs = [
-        ("match_training_test", "none"),
-        ("calibration_feature", "none"),
-        ("calibration_feature", "clip"),
-        ("calibration_feature", "tanh"),
-    ]
+    test_configs = diagnostic_test_configs(args.include_leaky_diagnostic)
+    if args.include_leaky_diagnostic:
+        print(LEAKY_DIAGNOSTIC_WARNING)
     for scaler_mode, scaler_postprocess in test_configs:
         _, _, summary_row = run_lds_feature_test(scaler_mode, scaler_postprocess)
         summary_rows.append(summary_row)

@@ -7,8 +7,9 @@ The replay MAT is still used by eeg_viewer2.py for waveform display. This script
 uses the more stable offline DE+LDS feature chain to generate prediction CSV
 files that eeg_viewer2.py can synchronize during playback.
 
-The display files are based on model predictions aggregated at trial level, not
-on true labels.
+Formal display fields use fixed, causal postprocessing. For window k, only
+calibrated probabilities from the current trial up to window k are available.
+Trial summaries and true labels are retained for post-playback evaluation only.
 """
 
 import os
@@ -37,13 +38,19 @@ FS = 200
 WINDOW_SAMPLES = 200
 NEGATIVE_THRESHOLD = 0.5
 DISPLAY_TEMPERATURE = 3.0
-DISPLAY_PROB_MODE = "segment_median"
+DISPLAY_PROB_MODE = "causal_rolling_median"
 DISPLAY_SEGMENT_WINDOW = 10
-CALIBRATION_PREFERENCE_TOLERANCE = 0.5
 FEATURE_SOURCE = "DE+LDS"
+FORMAL_SCALER_MODE = "calibration_feature"
+LEAKY_DIAGNOSTIC_SCALER_MODE = "match_training_test"
+LEAKY_DIAGNOSTIC_WARNING = (
+    "WARNING: match_training_test uses replay/test-set statistics and is for "
+    "diagnostic reproduction only. It must not be used for deployment or "
+    "formal display output."
+)
 
-# Keep output filenames exactly keyed by scaler_mode. The postprocess choice is
-# still recorded inside the CSV.
+# Formal and diagnostic scaler modes keep separate outputs. Diagnostic filenames
+# also carry an explicit diagnostic_only suffix.
 SCALER_POSTPROCESS_BY_MODE = {
     "match_training_test": "none",
     "calibration_feature": "clip",
@@ -97,6 +104,11 @@ def parse_args(argv=None):
     parser.add_argument("--model-path", default=lds.MODEL_PATH, help="UDA-DDA model weight path. Weights are not distributed in this repository.")
     parser.add_argument("--meta-csv", default=META_CSV, help="Replay metadata CSV with time_sec/trial/label rows.")
     parser.add_argument("--output-dir", default=OUT_DIR, help="Directory for generated prediction CSV files.")
+    parser.add_argument(
+        "--include-leaky-diagnostic",
+        action="store_true",
+        help="Also generate match_training_test diagnostic-only outputs. Never used as formal display output.",
+    )
     return parser.parse_args(argv)
 
 
@@ -165,9 +177,12 @@ def run_model_probs(model, features, device):
 
 
 def output_paths(scaler_mode):
-    pred_csv = os.path.join(OUT_DIR, f"subject15_trial4_15_predictions_lds_{scaler_mode}.csv")
-    trial_summary_csv = os.path.join(OUT_DIR, f"subject15_trial4_15_trial_summary_lds_{scaler_mode}.csv")
-    display_csv = os.path.join(OUT_DIR, f"subject15_trial4_15_predictions_display_lds_{scaler_mode}.csv")
+    suffix = scaler_mode
+    if scaler_mode == LEAKY_DIAGNOSTIC_SCALER_MODE:
+        suffix = f"{scaler_mode}_diagnostic_only"
+    pred_csv = os.path.join(OUT_DIR, f"subject15_trial4_15_predictions_lds_{suffix}.csv")
+    trial_summary_csv = os.path.join(OUT_DIR, f"subject15_trial4_15_trial_summary_lds_{suffix}.csv")
+    display_csv = os.path.join(OUT_DIR, f"subject15_trial4_15_predictions_display_lds_{suffix}.csv")
     return pred_csv, trial_summary_csv, display_csv
 
 
@@ -261,69 +276,49 @@ def build_trial_summary(pred_df, scaler_mode):
     return pd.DataFrame(rows)
 
 
-def choose_display_strategy(trial_summary_df):
-    acc = {
-        "mean": float(trial_summary_df["binary_correct_mean"].mean() * 100.0),
-        "median": float(trial_summary_df["binary_correct_median"].mean() * 100.0),
-        "majority": float(trial_summary_df["binary_correct_majority"].mean() * 100.0),
-    }
-    # For the upper-computer display, keep state stable with trial-level median.
-    # Dynamic window/segment probabilities below only affect the displayed curve.
-    return "median", acc
-
-
 def compute_dynamic_display_probabilities(display_df):
-    if DISPLAY_PROB_MODE not in {"window", "segment_mean", "segment_median"}:
+    """Compute a causal trailing probability independently inside each trial."""
+    if DISPLAY_PROB_MODE != "causal_rolling_median":
         raise ValueError(f"Unknown DISPLAY_PROB_MODE: {DISPLAY_PROB_MODE}")
 
     dynamic_probs = pd.Series(index=display_df.index, dtype=float)
 
     for _, group in display_df.groupby("trial_id", sort=False):
         calibrated = group["prob_negative_calibrated"].astype(float)
-        if DISPLAY_PROB_MODE == "window":
-            values = calibrated
-        elif DISPLAY_PROB_MODE == "segment_mean":
-            values = calibrated.rolling(DISPLAY_SEGMENT_WINDOW, min_periods=1).mean()
-        else:
-            values = calibrated.rolling(DISPLAY_SEGMENT_WINDOW, min_periods=1).median()
+        values = calibrated.rolling(
+            window=DISPLAY_SEGMENT_WINDOW,
+            min_periods=1,
+            center=False,
+        ).median()
         dynamic_probs.loc[group.index] = values
 
     return dynamic_probs.clip(0.0, 1.0).astype(float)
 
 
-def build_display_df(pred_df, trial_summary_df, strategy):
+def build_display_df(pred_df):
+    """Build label-independent display fields from causal model probabilities."""
     display_df = pred_df.copy()
-    summary_by_trial = {int(r["trial_id"]): r for _, r in trial_summary_df.iterrows()}
     dynamic_display_probs = compute_dynamic_display_probabilities(display_df)
 
-    for trial_id, row in summary_by_trial.items():
-        mask = display_df["trial_id"] == trial_id
-        if strategy == "mean":
-            raw_p_neg = float(row["mean_prob_negative"])
-            state = row["mean_prob_binary_pred"]
-        elif strategy == "median":
-            raw_p_neg = float(row["median_prob_negative"])
-            state = row["median_prob_binary_pred"]
-        elif strategy == "majority":
-            raw_p_neg = float(row["negative_window_ratio"])
-            state = row["window_majority_binary_pred"]
-        else:
-            raise ValueError(f"Unknown display strategy: {strategy}")
-
-        raw_p_neg = float(np.clip(raw_p_neg, 0.0, 1.0))
-        display_df.loc[mask, "display_state"] = state
-        display_df.loc[mask, "raw_display_prob_negative"] = raw_p_neg
-        display_df.loc[mask, "display_strategy"] = strategy
-        display_df.loc[mask, "display_temperature"] = DISPLAY_TEMPERATURE
-        display_df.loc[mask, "display_probability_source"] = (
-            f"temperature_calibrated_softmax_{DISPLAY_PROB_MODE}"
-        )
-        display_df.loc[mask, "display_prob_mode"] = DISPLAY_PROB_MODE
-        display_df.loc[mask, "display_segment_window"] = DISPLAY_SEGMENT_WINDOW
-
+    display_df["raw_display_prob_negative"] = (
+        display_df["prob_negative_calibrated"].astype(float).clip(0.0, 1.0)
+    )
     display_df["display_prob_negative"] = dynamic_display_probs
     display_df["display_prob_non_negative"] = 1.0 - display_df["display_prob_negative"]
     display_df["display_negative_score"] = display_df["display_prob_negative"] * 100.0
+    display_df["display_state"] = display_df["display_prob_negative"].map(pred_binary_label)
+    display_df["display_strategy"] = DISPLAY_PROB_MODE
+    display_df["display_temperature"] = DISPLAY_TEMPERATURE
+    display_df["display_probability_source"] = (
+        f"temperature_calibrated_softmax_{DISPLAY_PROB_MODE}"
+    )
+    display_df["display_prob_mode"] = DISPLAY_PROB_MODE
+    display_df["display_segment_window"] = DISPLAY_SEGMENT_WINDOW
+    display_df["output_role"] = np.where(
+        display_df["scaler_mode"] == FORMAL_SCALER_MODE,
+        "formal_display",
+        "diagnostic_only",
+    )
 
     return display_df
 
@@ -345,8 +340,12 @@ def run_one_mode(model, calib_features, online_features, window_meta_df, scaler_
     probs = run_model_probs(model, online_scaled, lds.DEVICE)
     pred_df = build_prediction_df(probs, window_meta_df, scaler_mode, scaler_postprocess)
     trial_summary_df = build_trial_summary(pred_df, scaler_mode)
-    display_strategy, binary_acc = choose_display_strategy(trial_summary_df)
-    display_df = build_display_df(pred_df, trial_summary_df, display_strategy)
+    display_df = build_display_df(pred_df)
+    binary_acc = {
+        "mean": float(trial_summary_df["binary_correct_mean"].mean() * 100.0),
+        "median": float(trial_summary_df["binary_correct_median"].mean() * 100.0),
+        "majority": float(trial_summary_df["binary_correct_majority"].mean() * 100.0),
+    }
     raw_display_min = float(display_df["raw_display_prob_negative"].min())
     raw_display_max = float(display_df["raw_display_prob_negative"].max())
     calibrated_display_min = float(display_df["display_prob_negative"].min())
@@ -382,7 +381,7 @@ def run_one_mode(model, calib_features, online_features, window_meta_df, scaler_
         f"Binary trial acc mean={binary_acc['mean']:.2f}% | "
         f"median={binary_acc['median']:.2f}% | majority={binary_acc['majority']:.2f}%"
     )
-    print(f"Selected display strategy: {display_strategy}")
+    print(f"Display strategy: {DISPLAY_PROB_MODE}")
     print(f"Saved: {pred_csv}")
     print(f"Saved: {trial_summary_csv}")
     print(f"Saved: {display_csv}")
@@ -393,7 +392,7 @@ def run_one_mode(model, calib_features, online_features, window_meta_df, scaler_
         "binary_acc_median": binary_acc["median"],
         "binary_acc_majority": binary_acc["majority"],
         "three_class_acc_mean": three_class_acc_mean,
-        "selected_display_strategy": display_strategy,
+        "display_strategy": DISPLAY_PROB_MODE,
         "selected_display_csv": display_csv,
         "selected_prediction_csv": pred_csv,
         "selected_trial_summary_csv": trial_summary_csv,
@@ -403,7 +402,33 @@ def run_one_mode(model, calib_features, online_features, window_meta_df, scaler_
         "calibrated_display_prob_negative_max": calibrated_display_max,
         "display_prob_mode": DISPLAY_PROB_MODE,
         "display_segment_window": DISPLAY_SEGMENT_WINDOW,
+        "output_role": (
+            "formal_display"
+            if scaler_mode == FORMAL_SCALER_MODE
+            else "diagnostic_only"
+        ),
     }
+
+
+def scaler_modes_to_run(include_leaky_diagnostic=False):
+    modes = [FORMAL_SCALER_MODE]
+    if include_leaky_diagnostic:
+        modes.append(LEAKY_DIAGNOSTIC_SCALER_MODE)
+    return modes
+
+
+def select_formal_output_row(compare_df):
+    """Select the fixed formal source without consulting labels or accuracy."""
+    rows = compare_df[
+        (compare_df["scaler_mode"] == FORMAL_SCALER_MODE)
+        & (compare_df["output_role"] == "formal_display")
+    ]
+    if len(rows) != 1:
+        raise ValueError(
+            "Expected exactly one formal calibration_feature output row, "
+            f"found {len(rows)}."
+        )
+    return rows.iloc[0]
 
 
 def main(argv=None):
@@ -435,8 +460,12 @@ def main(argv=None):
     print("Loading UDA-DDA model...")
     model = lds.load_model(lds.MODEL_PATH, lds.DEVICE)
 
+    modes = scaler_modes_to_run(args.include_leaky_diagnostic)
+    if args.include_leaky_diagnostic:
+        print(LEAKY_DIAGNOSTIC_WARNING)
+
     summary_rows = []
-    for scaler_mode in ("match_training_test", "calibration_feature"):
+    for scaler_mode in modes:
         summary_rows.append(
             run_one_mode(
                 model=model,
@@ -448,45 +477,15 @@ def main(argv=None):
         )
 
     compare_df = pd.DataFrame(summary_rows)
-    # Pick the default display source by selected display strategy accuracy.
-    # If calibration_feature is tied or within a small tolerance, prefer it
-    # because it matches the deployment protocol: trials 1-3 calibration,
-    # trials 4-15 detection. match_training_test remains a diagnostic upper bound.
-    def selected_acc(row):
-        return float(row[f"binary_acc_{row['selected_display_strategy']}"])
-
-    compare_df["_selected_acc"] = compare_df.apply(selected_acc, axis=1)
-    compare_df["selected_reason"] = ""
-
-    best_idx_by_acc = int(compare_df["_selected_acc"].idxmax())
-    best_row_by_acc = compare_df.loc[best_idx_by_acc]
-    calibration_rows = compare_df[compare_df["scaler_mode"] == "calibration_feature"]
-    if not calibration_rows.empty:
-        calibration_idx = int(calibration_rows.index[0])
-        calibration_acc = float(compare_df.loc[calibration_idx, "_selected_acc"])
-        best_acc = float(best_row_by_acc["_selected_acc"])
-        if best_acc - calibration_acc <= CALIBRATION_PREFERENCE_TOLERANCE:
-            best_idx = calibration_idx
-            selected_reason = (
-                "prefer calibration_feature under tied accuracy because it matches deployment protocol"
-            )
-        else:
-            best_idx = best_idx_by_acc
-            selected_reason = "select highest selected display accuracy"
-    else:
-        best_idx = best_idx_by_acc
-        selected_reason = "select highest selected display accuracy"
-
-    compare_df.loc[best_idx, "selected_reason"] = selected_reason
-    best_row = compare_df.loc[best_idx]
+    formal_row = select_formal_output_row(compare_df)
 
     ensure_output_writable(COMPARE_SUMMARY_CSV)
     compare_df.to_csv(COMPARE_SUMMARY_CSV, index=False, encoding="utf-8-sig")
 
     ensure_output_writable(DEFAULT_DISPLAY_CSV)
     ensure_output_writable(DEFAULT_PRED_CSV)
-    shutil.copyfile(best_row["selected_display_csv"], DEFAULT_DISPLAY_CSV)
-    shutil.copyfile(best_row["selected_prediction_csv"], DEFAULT_PRED_CSV)
+    shutil.copyfile(formal_row["selected_display_csv"], DEFAULT_DISPLAY_CSV)
+    shutil.copyfile(formal_row["selected_prediction_csv"], DEFAULT_PRED_CSV)
 
     print("\n" + "=" * 80)
     print("LDS compare summary:")
@@ -498,51 +497,46 @@ def main(argv=None):
                 "binary_acc_median",
                 "binary_acc_majority",
                 "three_class_acc_mean",
-                "selected_display_strategy",
-                "_selected_acc",
+                "display_strategy",
                 "raw_display_prob_negative_min",
                 "raw_display_prob_negative_max",
                 "calibrated_display_prob_negative_min",
                 "calibrated_display_prob_negative_max",
                 "display_prob_mode",
                 "display_segment_window",
-                "selected_reason",
+                "output_role",
             ]
         ].to_string(index=False)
     )
-    print("\nDefault display file selected for eeg_viewer2.py:")
-    print(f"  scaler_mode: {best_row['scaler_mode']}")
-    print(f"  strategy: {best_row['selected_display_strategy']}")
-    print(f"  source display CSV: {best_row['selected_display_csv']}")
+    print("\nFixed formal display file for eeg_viewer2.py:")
+    print(f"  scaler_mode: {formal_row['scaler_mode']}")
+    print(f"  scaler_postprocess: {SCALER_POSTPROCESS_BY_MODE[FORMAL_SCALER_MODE]}")
+    print(f"  strategy: {formal_row['display_strategy']}")
+    print(f"  source display CSV: {formal_row['selected_display_csv']}")
     print(f"  copied to: {DEFAULT_DISPLAY_CSV}")
     print(f"  copied prediction CSV to: {DEFAULT_PRED_CSV}")
     print("\nDisplay probability calibration:")
     print(f"  temperature = {DISPLAY_TEMPERATURE}")
     print(
-        "  raw trial-level display negative range = "
-        f"[{best_row['raw_display_prob_negative_min']:.3f}, "
-        f"{best_row['raw_display_prob_negative_max']:.3f}]"
+        "  calibrated per-window negative range = "
+        f"[{formal_row['raw_display_prob_negative_min']:.3f}, "
+        f"{formal_row['raw_display_prob_negative_max']:.3f}]"
     )
     print(
-        "  dynamic display negative range = "
-        f"[{best_row['calibrated_display_prob_negative_min']:.3f}, "
-        f"{best_row['calibrated_display_prob_negative_max']:.3f}]"
+        "  causal display negative range = "
+        f"[{formal_row['calibrated_display_prob_negative_min']:.3f}, "
+        f"{formal_row['calibrated_display_prob_negative_max']:.3f}]"
     )
     print("\nDisplay probability mode:")
     print(f"  DISPLAY_PROB_MODE = {DISPLAY_PROB_MODE}")
     print(f"  DISPLAY_SEGMENT_WINDOW = {DISPLAY_SEGMENT_WINDOW}")
     print("  Original softmax probabilities remain in prob_* fields.")
-    print("  display_state comes from model trial-level aggregation.")
-    print("  display_prob_negative comes from window/segment calibrated probabilities.")
-    print("  true labels are only used for evaluation logs, not for display prediction.")
-    if best_row["scaler_mode"] == "calibration_feature":
-        print(
-            "最终默认展示文件选择 calibration_feature + clip，因为其准确率与 "
-            "match_training_test 相同或差距很小，且更符合前3个trial标定、"
-            "后12个trial检测的部署流程。"
-        )
-    print(f"  selected_reason: {selected_reason}")
-    print("IMPORTANT: display fields come from model prediction aggregation, not true-label substitution.")
+    print("  display_prob_negative uses a trial-reset causal trailing median.")
+    print("  display_state is computed per window from display_prob_negative >= 0.5.")
+    print("  true labels and trial accuracy never select or modify formal display fields.")
+    print("  formal output is always calibration_feature + clip.")
+    if args.include_leaky_diagnostic:
+        print(LEAKY_DIAGNOSTIC_WARNING)
     print(f"Compare summary saved: {COMPARE_SUMMARY_CSV}")
 
 

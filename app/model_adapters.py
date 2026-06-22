@@ -7,7 +7,7 @@ BCI 闭环神经调控系统 - 模型适配器层
 功能：
 1. 定义统一的模型接口 BaseModelAdapter
 2. 实现 SVMAdapter（传统 DE 特征 + SVM）
-3. 实现 DeepLearningAdapter（PyTorch 深度学习模型模板）
+3. 实现 GenericDeepLearningAdapter、EEGNetAdapter 和 UDADDAOnlineAdapter
 
 设计模式：适配器模式（Adapter Pattern）
 - 将不同类型的模型（SVM、深度学习）统一为相同接口
@@ -30,8 +30,10 @@ from collections import deque
 
 try:
     from online_emotion_engine import OnlineEmotionEngine, DEFAULT_UDA_DDA_MODEL_PATH, DEFAULT_SCALER_PATH
-except Exception:
+    ONLINE_EMOTION_ENGINE_IMPORT_ERROR = None
+except Exception as exc:
     OnlineEmotionEngine = None
+    ONLINE_EMOTION_ENGINE_IMPORT_ERROR = exc
     DEFAULT_UDA_DDA_MODEL_PATH = os.environ.get(
         "UDA_DDA_MODEL_PATH",
         os.path.join("models", "subject15_calib_supervised_best_model.pth"),
@@ -268,7 +270,7 @@ class SVMAdapter(BaseModelAdapter):
             self._log(f"[SVMAdapter] ❌ 推理流异常: {e}")
             return 50.0, "Error", 1, default_probs
 
-class DeepLearningAdapter(BaseModelAdapter):
+class GenericDeepLearningAdapter(BaseModelAdapter):
     """
     深度学习模型适配器（模板/占位符）
 
@@ -314,7 +316,7 @@ class DeepLearningAdapter(BaseModelAdapter):
             import torch
 
             if self.model_class is None:
-                self._log("[DeepLearningAdapter] 警告: 未指定 model_class，无法加载模型")
+                self._log("[GenericDeepLearningAdapter] 警告: 未指定 model_class，无法加载模型")
                 self.is_loaded = False
                 return
 
@@ -332,17 +334,17 @@ class DeepLearningAdapter(BaseModelAdapter):
                 self.model.to(self.device)
                 self.model.eval()
 
-                self._log(f"[DeepLearningAdapter] 成功加载模型: {self.model_path}")
+                self._log(f"[GenericDeepLearningAdapter] 成功加载模型: {self.model_path}")
                 self.is_loaded = True
             else:
-                self._log(f"[DeepLearningAdapter] 模型文件不存在: {self.model_path}")
+                self._log(f"[GenericDeepLearningAdapter] 模型文件不存在: {self.model_path}")
                 self.is_loaded = False
 
         except ImportError:
-            self._log("[DeepLearningAdapter] 未安装 PyTorch，无法使用深度学习模型")
+            self._log("[GenericDeepLearningAdapter] 未安装 PyTorch，无法使用深度学习模型")
             self.is_loaded = False
         except Exception as e:
-            self._log(f"[DeepLearningAdapter] 加载模型失败: {e}")
+            self._log(f"[GenericDeepLearningAdapter] 加载模型失败: {e}")
             self.is_loaded = False
 
     def preprocess(self, eeg_matrix: np.ndarray, fs: float = 200.0) -> 'torch.Tensor':
@@ -376,10 +378,14 @@ class DeepLearningAdapter(BaseModelAdapter):
             return data_tensor
 
         except Exception as e:
-            self._log(f"[DeepLearningAdapter] 预处理失败: {e}")
+            self._log(f"[GenericDeepLearningAdapter] 预处理失败: {e}")
             return None
 
-    def predict(self, eeg_matrix: np.ndarray, fs: float = 200.0) -> Tuple[float, str, int]:
+    def predict(
+        self,
+        eeg_matrix: np.ndarray,
+        fs: float = 200.0,
+    ) -> Tuple[float, str, int, np.ndarray]:
         """
         使用深度学习模型进行预测
 
@@ -388,14 +394,12 @@ class DeepLearningAdapter(BaseModelAdapter):
             fs: 采样率，默认 200 Hz
 
         Returns:
-            tuple: (score, ui_emotion, class_idx)
+            tuple: (score, ui_emotion, class_idx, probabilities)
         """
+        default_probs = np.array([0.333, 0.333, 0.334], dtype=np.float32)
         if not self.is_loaded or self.model is None:
             # 模型未加载，返回虚拟值用于测试
-            score = np.clip(np.random.normal(50, 15), 0, 100)
-            class_idx = np.random.randint(0, 3)
-            emotion_map = ["Negative (负向)", "Neutral (中性)", "Positive (正向)"]
-            return float(score), emotion_map[class_idx], class_idx
+            return 33.3, "Unknown", 1, default_probs
 
         try:
             import torch
@@ -403,7 +407,7 @@ class DeepLearningAdapter(BaseModelAdapter):
             # 预处理数据
             input_tensor = self.preprocess(eeg_matrix, fs)
             if input_tensor is None:
-                return 50.0, "Unknown", 1
+                return 33.3, "Unknown", 1, default_probs
 
             # 推理
             with torch.no_grad():
@@ -431,11 +435,11 @@ class DeepLearningAdapter(BaseModelAdapter):
             }
             ui_emotion = emotion_map.get(class_idx, "Unknown")
 
-            return float(score), ui_emotion, class_idx
+            return float(score), ui_emotion, class_idx, np.asarray(probs, dtype=np.float32)
 
         except Exception as e:
-            self._log(f"[DeepLearningAdapter] 预测失败: {e}，返回默认值")
-            return 50.0, "Unknown", 1
+            self._log(f"[GenericDeepLearningAdapter] 预测失败: {e}，返回默认值")
+            return 33.3, "Unknown", 1, default_probs
 
 
 # ============ 模型适配器工厂 ============
@@ -457,7 +461,11 @@ class UDADDAOnlineAdapter(BaseModelAdapter):
     ):
         super().__init__(model_path, log_callback)
         if OnlineEmotionEngine is None:
-            raise ImportError("Cannot import OnlineEmotionEngine from online_emotion_engine.py")
+            raise ImportError(
+                "UDA-DDA online inference requires the optional "
+                "online_emotion_engine.py module, which is not distributed in "
+                f"this public repository. Import error: {ONLINE_EMOTION_ENGINE_IMPORT_ERROR}"
+            )
 
         self.output_mode = output_mode
         self.engine = OnlineEmotionEngine(
@@ -494,6 +502,8 @@ class AdapterFactory:
     DEFAULT_MODEL_PATHS = {
         'svm': os.path.join("models", "svm_de_8ch_baseline_model.pkl"),
         'eegnet': os.path.join("models", "eegnet_8ch.pth"),
+        'deep': os.path.join("models", "deep_model.pth"),
+        'sdc-net': os.path.join("models", "sdc_net_model.pth"),
         'uda-dda-online': DEFAULT_UDA_DDA_MODEL_PATH,
         'uda-dda-binary': DEFAULT_UDA_DDA_MODEL_PATH,
     }
@@ -581,17 +591,15 @@ class AdapterFactory:
 
         elif model_type == 'eegnet':
             # EEGNet 使用 EEGNetPro_Adapter 作为模型类
-            model_class = kwargs.get('model_class', EEGNetPro_Adapter)
-            return DeepLearningAdapter(
+            return EEGNetAdapter(
                 model_path=model_path,
-                model_class=model_class,
                 log_callback=kwargs.get('log_callback'),
-                device=kwargs.get('device', 'cpu')
+                device=kwargs.get('device')
             )
 
-        elif model_type in ['uda-dda', 'sdc-net', 'deep']:
+        elif model_type in ['sdc-net', 'deep']:
             # 其他深度学习模型
-            return DeepLearningAdapter(
+            return GenericDeepLearningAdapter(
                 model_path=model_path,
                 model_class=kwargs.get('model_class'),
                 log_callback=kwargs.get('log_callback'),
@@ -641,15 +649,22 @@ class EEGNetPro_Adapter(nn.Module):
 
 
 # --- 2. 编写 EEGNet 的适配器逻辑 ---
-class DeepLearningAdapter(BaseModelAdapter):
+class EEGNetAdapter(BaseModelAdapter):
     """
     EEGNet 深度学习模型适配器
     功能：接收 8 通道 1 秒原始脑电，转为 PyTorch 张量进行实时推理
     """
 
-    def __init__(self, model_path: str = os.path.join("models", "eegnet_8ch.pth"), log_callback=None):
+    def __init__(
+        self,
+        model_path: str = os.path.join("models", "eegnet_8ch.pth"),
+        log_callback=None,
+        device=None,
+    ):
         super().__init__(model_path, log_callback)
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device(
+            device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        )
 
         # 深度学习通常在模型内部处理时序关系，但为了系统兼容性，我们保留标定接口
         self.is_calibrating = False
@@ -774,8 +789,9 @@ if __name__ == '__main__':
     print("测试深度学习适配器（虚拟）")
     print("-" * 60)
 
-    dl_adapter = DeepLearningAdapter(
+    dl_adapter = GenericDeepLearningAdapter(
         model_path="dummy_model.pth",
+        model_class=None,
         log_callback=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] {msg}")
     )
 

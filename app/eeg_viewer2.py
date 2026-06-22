@@ -25,12 +25,20 @@ import pyqtgraph as pg
 
 # ============ 引入决策引擎和模型适配器 ============
 try:
-    from model_adapters import AdapterFactory, SVMAdapter, DeepLearningAdapter
+    from model_adapters import (
+        AdapterFactory,
+        EEGNetAdapter,
+        GenericDeepLearningAdapter,
+        SVMAdapter,
+        UDADDAOnlineAdapter,
+    )
     MODEL_ADAPTERS_IMPORT_ERROR = None
 except Exception as exc:
     AdapterFactory = None
     SVMAdapter = None
-    DeepLearningAdapter = None
+    GenericDeepLearningAdapter = None
+    EEGNetAdapter = None
+    UDADDAOnlineAdapter = None
     MODEL_ADAPTERS_IMPORT_ERROR = exc
 
 # 尝试导入SVM相关模块（如果失败会打印警告）

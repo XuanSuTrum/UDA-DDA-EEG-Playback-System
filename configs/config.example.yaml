@@ -27,5 +27,11 @@ playback:
 prediction:
   source: predictions_display.csv
   feature_source: DE+LDS
+  formal_scaler_mode: calibration_feature
+  scaler_postprocess: clip
+  display_probability_mode: causal_rolling_median
+  display_temperature: 3.0
+  display_segment_window: 10
   negative_threshold_reference: 0.5
   non_negative_definition: P(neutral) + P(positive)
+  include_leaky_diagnostic: false

@@ -1,64 +1,103 @@
 # UDA-DDA EEG Playback System
 
-基于 UDA-DDA（Unsupervised Domain Adaptation with Dynamic Distribution Alignment）模型输出的 SEED 上位机离线回放验证项目。仓库整理的是“后台预测结果生成 -> 上位机按时间戳同步显示 -> 日志解析绘图”的公开展示链路。
+基于 UDA-DDA（Unsupervised Domain Adaptation with Dynamic Distribution Alignment）模型输出的 SEED 上位机离线回放验证项目。仓库展示“离线模型输出生成 -> 上位机按时间戳同步显示 -> 日志解析绘图”的完整链路。
 
 ## 系统定位
 
-当前系统的准确定位是：
-
 1. UDA-DDA 模型训练和无监督域适应在离线阶段完成。
-2. 后台推理脚本生成带时间戳的窗口级预测结果。
+2. 后台脚本生成带时间戳的窗口级预测结果。
 3. 上位机读取脑电回放数据和 `predictions_display.csv`。
-4. 上位机按照时间戳同步显示波形、频谱、概率、状态和日志。
-5. 独立绘图脚本解析日志并生成消极类别概率连续曲线。
+4. 上位机同步显示波形、频谱、概率、状态和日志。
+5. 独立脚本解析日志并绘制消极类别概率曲线。
 
-当前不是实时脑电采集验证，不是在上位机回放过程中实时调用模型，也不构成自主刺激控制验证。
+当前不是实时脑电采集验证，不是在回放期间实时调用模型，也不构成自主闭环刺激控制验证。
 
-## 工作流程
+## 正式显示规则
+
+正式输出固定使用：
 
 ```text
-离线训练/域适应
-  -> DE+LDS 特征和 UDA-DDA 权重
-  -> inference/generate_upper_demo_predictions_lds.py
-  -> subject15_trial4_15_predictions_display.csv
-  -> app/eeg_viewer2.py 离线回放同步显示
-  -> analysis/plot_upper_demo_negative_history_from_log.py 生成概率曲线
+scaler_mode = calibration_feature
+scaler_postprocess = clip
+DISPLAY_TEMPERATURE = 3.0
+DISPLAY_PROB_MODE = causal_rolling_median
+DISPLAY_SEGMENT_WINDOW = 10
 ```
 
-详见 [docs/workflow.md](docs/workflow.md)。
+这些参数必须在正式回放前固定，不能利用 trial 4 至 trial 15 的真实标签重新搜索或调节。
+
+每个 trial 单独维护历史。第 `k` 个窗口的显示概率为：
+
+```text
+display_prob_negative(k)
+  = median(calibrated_prob_negative[max(1, k-9) ... k])
+```
+
+因此第 `k` 个输出只使用当前窗口和同一 trial 内的历史窗口，不使用未来窗口，不跨 trial 平滑，也不对缺失窗口插值。
+
+```text
+display_prob_non_negative = 1 - display_prob_negative
+display_negative_score = 100 * display_prob_negative
+display_state = 负性      if display_prob_negative >= 0.5
+                非负性    otherwise
+```
+
+温度校准只影响 `display_*` 字段。模型原始三分类 softmax 概率 `prob_negative`、`prob_neutral` 和 `prob_positive` 完整保留。
+
+## 标签独立性
+
+`true_label_name` 和 `raw_label` 仅允许用于：
+
+- 回放结束后的描述性统计；
+- 日志对照；
+- 绘图背景；
+- 离线评估。
+
+真实标签不参与概率、状态、scaler 模式、参数选择或默认文件选择。`trial_summary.csv` 也只用于回放后的描述性评估，不会反向修改任何 `display_*` 字段。
+
+## 泄漏诊断模式
+
+`match_training_test` 使用正式回放/测试集统计量拟合 scaler，属于 `leaky_diagnostic`。默认运行不会执行该模式。
+
+仅在需要复现实验诊断时显式启用：
+
+```bash
+python inference/generate_upper_demo_predictions_lds.py ... --include-leaky-diagnostic
+python inference/test_offline_lds.py ... --include-leaky-diagnostic
+```
+
+该模式：
+
+- 输出文件名包含 `diagnostic_only`；
+- 会打印数据泄漏警告；
+- 无论准确率多高，都不会成为默认 `predictions_display.csv`；
+- 不得用于部署或正式显示。
 
 ## 仓库结构
 
 ```text
 .
-├── app/
-│   ├── eeg_viewer2.py
-│   └── model_adapters.py
-├── inference/
-│   ├── generate_upper_demo_predictions_lds.py
-│   ├── test_offline_lds.py
-│   ├── SDA_DDA.py
-│   ├── backbone.py
-│   ├── mmd.py
-│   ├── cmmd.py
-│   └── utils.py
-├── analysis/
-│   └── plot_upper_demo_negative_history_from_log.py
-├── configs/
-│   └── config.example.yaml
-├── examples/
-│   ├── predictions_display.example.csv
-│   ├── upper_demo_prediction_sync.example.log
-│   └── negative_history.example.png
-├── docs/
-│   └── workflow.md
-└── tests/
-    └── test_prediction_artifacts.py
+|-- app/
+|   |-- eeg_viewer2.py
+|   `-- model_adapters.py
+|-- inference/
+|   |-- generate_upper_demo_predictions_lds.py
+|   |-- test_offline_lds.py
+|   |-- SDA_DDA.py
+|   |-- backbone.py
+|   |-- mmd.py
+|   `-- cmmd.py
+|-- analysis/
+|   `-- plot_upper_demo_negative_history_from_log.py
+|-- configs/config.example.yaml
+|-- examples/
+|-- docs/workflow.md
+`-- tests/
 ```
 
 ## 环境安装
 
-建议使用 Python 3.9 或更高版本。当前整理过程使用本地 Python 环境完成语法检查和轻量测试。
+建议使用 Python 3.9 或更高版本：
 
 ```bash
 python -m venv .venv
@@ -66,11 +105,9 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Linux/macOS 激活命令为 `source .venv/bin/activate`。
+## 生成正式预测结果
 
-## 后台预测结果生成
-
-SEED 原始数据、被试级特征文件和模型权重不随仓库分发。准备好本地文件后运行：
+SEED 数据、被试级特征和模型权重不随仓库分发。
 
 ```bash
 python inference/generate_upper_demo_predictions_lds.py ^
@@ -81,7 +118,14 @@ python inference/generate_upper_demo_predictions_lds.py ^
   --output-dir outputs/upper_demo
 ```
 
-脚本会生成 `subject15_trial4_15_predictions_display.csv`。上位机离线回放时，该 CSV 是预测结果来源。
+默认输出：
+
+```text
+subject15_trial4_15_predictions.csv
+subject15_trial4_15_predictions_display.csv
+```
+
+二者始终复制自 `calibration_feature + clip` 结果，不根据真实标签或准确率选择。
 
 ## 上位机启动
 
@@ -89,9 +133,13 @@ python inference/generate_upper_demo_predictions_lds.py ^
 python app/eeg_viewer2.py
 ```
 
-在界面中加载回放 MAT/CSV 文件。上位机会在回放文件同目录查找 `subject15_trial4_15_predictions_display.csv` 等候选预测文件。找到后启用 `prediction_mode_enabled=True`，此时不会实时运行 UDA-DDA/SVM/EEGNet 推理，也不会调用 `model_thread.do_inference`。
+加载回放文件后，上位机会在同目录查找 `subject15_trial4_15_predictions_display.csv`。找到后启用 `prediction_mode_enabled=True`：
 
-右上角信息卡片显示：当前 Trial、原始试次标注、预测状态、消极类别概率、非消极类别概率、消极情绪得分和预测来源。原始试次标注仅用于离线验证显示，不参与概率计算。
+- 预测结果来源仍是 `predictions_display.csv`；
+- 不调用 `model_thread.do_inference`；
+- 右上角显示“当前情绪状态输出”信息卡片；
+- 原始试次标注只用于离线验证显示；
+- 波形和频谱回放逻辑保持不变。
 
 ## 日志绘图
 
@@ -101,33 +149,26 @@ python analysis/plot_upper_demo_negative_history_from_log.py ^
   --output outputs/negative_history_from_log.png
 ```
 
-示例输出图：
-
 ![negative history example](examples/negative_history.example.png)
 
-绘图约定：蓝线表示 `P(negative)`；背景表示 SEED 原始试次标注；50% 虚线仅为二类等概率参考线，不是刺激触发阈值；不同 trial 之间不连线；缺失日志时间点不插值；不显示背景网格线。
+蓝线表示 `P(negative)`；背景表示 SEED 原始试次标注；50% 虚线仅为二类等概率参考线，不是刺激触发阈值；不同 trial 之间不连线；缺失时间点不插值；不显示背景网格线。
 
-## predictions_display.csv 字段
+## predictions_display.csv
 
-示例见 [examples/predictions_display.example.csv](examples/predictions_display.example.csv)。核心字段包括：
+虚构示例见 [examples/predictions_display.example.csv](examples/predictions_display.example.csv)。核心字段包括：
 
-- `time_sec`：窗口中心对应的回放时间戳。
-- `trial_id`、`trial_time_sec`：SEED 试次编号和试次内时间。
-- `true_label_name`、`raw_label`：原始试次标注，仅用于离线验证显示。
-- `prob_negative`、`prob_neutral`、`prob_positive`：UDA-DDA 三分类概率。
-- `prob_non_negative`：`P(neutral) + P(positive)`。
-- `display_state`：上位机展示的二类状态。
-- `display_prob_negative`、`display_prob_non_negative`、`display_negative_score`：上位机同步显示字段。
-- `feature_source`、`scaler_mode`、`display_probability_source`：预测来源和后处理说明。
+- `time_sec`、`trial_id`、`trial_time_sec`
+- `prob_negative`、`prob_neutral`、`prob_positive`
+- `prob_non_negative = prob_neutral + prob_positive`
+- `prob_negative_calibrated`
+- `display_prob_negative`
+- `display_prob_non_negative`
+- `display_negative_score`
+- `display_state`
+- `display_prob_mode`
+- `display_segment_window`
+- `output_role`
 
-概率定义：
+## 数据与验证边界
 
-```text
-P(non-negative) = P(neutral) + P(positive) = 1 - P(negative)
-```
-
-## 数据与边界
-
-本仓库不包含 SEED 原始数据、被试级 MAT/EDF/BDF/SET/NPY/NPZ 文件、模型权重、训练检查点、scaler PKL、完整 `predictions_display.csv` 或完整系统运行日志。使用者需按 SEED 数据集许可自行获取数据，并在本地未跟踪目录中配置路径。
-
-本项目只展示离线回放验证链路，不宣称实时在线模型部署，也不宣称已实现自主闭环刺激控制。
+仓库不包含 SEED 原始数据、真实被试文件、模型权重、训练检查点、scaler PKL、完整预测 CSV 或完整系统日志。当前项目仅验证预计算结果接入上位机离线回放，不宣称实时在线模型部署或自主闭环刺激控制。
